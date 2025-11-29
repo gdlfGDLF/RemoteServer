@@ -65,75 +65,46 @@ public:
     }
     //解包
     SPackeg(const BYTE* pData,size_t& nSize){
-        qDebug()<<"解包开始";
-
-        // 假设这些是类的成员变量，我们只修改局部逻辑
-        const BYTE* cursor = pData;
-        size_t i = 0;
-
-        // 1. 包头寻找 (如果包头没对齐)
-        // 寻找逻辑保持不变，但现在 i 代表包头起始偏移量，cursor 指向 nLength
-        WORD temp_head = 0;
-        for (; i < nSize - sizeof(WORD); i++) {
+        const BYTE* cursor=pData;
+        size_t i=0;
+        WORD temp_head;
+        for (; i < nSize-sizeof(DWORD); i++) { // 循环直到找到包头
+            // 使用 memcpy 安全地读取潜在的包头
             memcpy(&temp_head, pData + i, sizeof(WORD));
             if (temp_head == 0XFEFF) {
-                cursor = pData + i + sizeof(WORD); // 游标指向 nLength
-                sHead = temp_head;
+                // 包头找到，游标移动到包头后的位置
+                cursor = pData + i + sizeof(WORD);
                 break;
             }
         }
-
-        // 2. 检查是否找到包头，并确保缓冲区足够容纳固定头部
-        if (sHead != 0XFEFF || (i + 10) > nSize) {
-            // 未找到包头，或者连固定头部都接收不完整
-            nSize = 0; // 告知外部未消耗数据
-            return;
-        }
-
-        // 3. 读取 nLength (总长度)
-        memcpy(&nLength, cursor, sizeof(DWORD));
-        cursor += sizeof(DWORD);
-
-        // 4. 【关键检查】确认数据包是否完整地在缓冲区中
-        if (i + nLength > nSize) {
-            // 数据包不完整，等待更多数据
-            nSize = 0;
-            return;
-        }
-
-        // 5. 读取 sCmd (命令)
-        qDebug()<<"befor"<<sCmd;
-        memcpy(&sCmd, cursor, sizeof(WORD));
-        qDebug()<<"after"<<sCmd;
-        cursor += sizeof(WORD);
-
-        // 6. 计算 Payload 大小
-        const int FIXED_HEADER_SIZE = sizeof(WORD) + sizeof(DWORD) + sizeof(WORD) + sizeof(WORD);
-        int payload_size = nLength - FIXED_HEADER_SIZE;
-
-        // 7. 读取 Payload (修正写入错误)
-        strData.resize(payload_size);
-        if (payload_size > 0) {
-            // ✅ 修正 UB：使用 data() 写入实际缓冲区
-            memcpy(strData.data(), cursor, payload_size);
-        }
-        cursor += payload_size; // 游标向前移动载荷长度
-
-        // 8. 读取 sSum (校验和)
+        //这里有个问题 我需要手动加一个字符串终止符。
+        //读取包中长度信息
+        memcpy(&nLength,cursor,sizeof(DWORD));
+        cursor+=sizeof(DWORD);
+        if (i + nLength > nSize) return;
+        memcpy(&sCmd,cursor,sizeof(WORD));
+        cursor+=sizeof(WORD);
+        int payload_size = nLength - (sizeof(WORD) + sizeof(DWORD) + sizeof(WORD) + sizeof(WORD));
+        if (payload_size < 0) { nSize = 0; return; }//验证数据包是否完整
+        strData.resize(payload_size+1);
+        memcpy(strData.data(), cursor, payload_size);
+        strData[payload_size]='\0';
+        cursor+=payload_size;
         memcpy(&sSum, cursor, sizeof(WORD));
         cursor += sizeof(WORD);
 
-        // 9. 校验和计算 (逻辑不变)
         WORD calculated_sum = 0;
-        // ... (校验逻辑) ...
+        // 5. 计算校验和：
+        for (size_t j = 0; j < strData.size(); j++) {
+            // 使用 unsigned char 确保求和是基于 0-255 的值
+            calculated_sum += (unsigned char)strData[j];
+        }
+        // 6. 校验结果
         if (calculated_sum != sSum) {
             qDebug() << "校验和不匹配，数据包可能已损坏！";
-            nSize = 0;
-            return;
+            return; // 校验失败
         }
-
-        // 10. 告知外部函数：成功解包，并消耗了多少字节
-        nSize = cursor - pData; // ✅ 返回消耗的字节数
+        nSize = cursor - pData;
     }
     ~SPackeg(){
 
@@ -197,42 +168,51 @@ public:
         qDebug() << sout.c_str();
     } //测试函数
     SOCKET AcceptClient();
-    int DealCommand(){
-        qDebug()<<"deal command";
-        if(m_client==-1)return false;
-        char* buffer=new char[4096];
-        memset(buffer,0,4096);
-        size_t index=0;
-        while (TRUE) {
-            //收到包
-            size_t len =recv(m_client,buffer+index,4096-index,0);
-            Dump((BYTE*)(buffer + index), len);
-            //qDebug()<<len;
-            if(len<=0)
-            {
-                return -1;
+    int DealCommand() {
+        if (m_client == -1) return false;
+        char* buffer = new char[4096];
+        size_t index = 0; // 缓冲区中有效数据的总长度
+
+        while (TRUE) { // 外部循环：持续接收数据
+            // 1. 接收数据：阻塞等待新数据，写入到缓冲区的末尾
+            size_t bytes_to_read = 4096 - index;
+            if (bytes_to_read == 0) {
+                qDebug() << "缓冲区已满，无法接收更多数据。";
+                break; // 缓冲满，强制退出，防止越界
             }
-            //创建包对象
-            index +=len;
-            len=index;
-            m_packet=SPackeg((BYTE*)buffer,len);
-            qDebug()<<m_packet.sCmd;
-            if(len>0)
-            {
-                memmove(buffer,buffer+len,4096-len);
-                index-=len;
-                qDebug()<<m_packet.sCmd;
-                return m_packet.sCmd;
+            size_t len = ::recv(m_client, buffer + index, bytes_to_read, 0);
+            if (len <= 0) {
+                // 连接断开或错误，退出函数
+                delete[] buffer;
+                return false;
             }
-            else
-            {
-                return -1;
+            index += len; // 更新缓冲区中总数据长度
+            // 解析累积的数据
+            size_t consumed_size = 0;
+            while (index >= 10) {
+                size_t total_data_size = index; // 传递当前总长度
+                m_packet = SPackeg((BYTE*)buffer, total_data_size);
+                consumed_size = total_data_size; // 获取解析器设置的消耗长度
+                if (consumed_size > 0) {
+                    qDebug() << "成功解包，命令 ID:" << m_packet.sCmd;
+                    // 清理缓冲区：移除已消耗的部分，将剩余数据前移
+                    memmove(buffer, buffer + consumed_size, index - consumed_size);
+                    index -= consumed_size; // 更新总长度
+                    // 立处理这个包，并退出 DealCommand
+                    delete[] buffer;
+                    return m_packet.sCmd;
+                } else {
+                    // 包不完整，或者格式错误，退出解析循环，等待更多数据
+                    break;
+                }
             }
         }
+        delete[] buffer;
+        return false; // 如果循环意外结束
     }
     void closeLink()
     {
-         closesocket(m_client);
+        closesocket(m_client);
     }
     SPackeg GetPackeg()
     {

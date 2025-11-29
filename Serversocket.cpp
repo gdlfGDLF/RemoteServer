@@ -49,9 +49,9 @@ SOCKET CServersocket::AcceptClient() {
     qDebug() << "Client connected from: " << inet_ntoa(client_adr.sin_addr)
              << ":" << ntohs(client_adr.sin_port);
 
-    if (m_client != INVALID_SOCKET) {
-        closesocket(m_client); // 关闭前一个客户端连接
-    }
+    // if (m_client != INVALID_SOCKET) {
+    //     closesocket(m_client); // 关闭前一个客户端连接
+    // }
     m_client = client_sock;
 
     return m_client;
@@ -73,10 +73,7 @@ bool CServersocket::GetMouseEvent(MouseEvent& mouse)
     }
     return false;
 }
-
 bool CServersocket::Send(const SPackeg& pack) {
-
-    // 假设 SPackeg 类有一个 getPacketBuffer() 方法，返回 const std::vector<char>&
     const std::vector<char>& buffer = pack.getPacketBuffer();
 
     // 1. 获取完整数据的指针
@@ -86,7 +83,7 @@ bool CServersocket::Send(const SPackeg& pack) {
     size_t totalSize = buffer.size(); // 或者使用 pack.nLength，但 buffer.size() 更可靠
 
     // 3. 调用 send，并检查是否所有字节都发送成功
-    int bytes_sent = ::send(m_sock, pData, totalSize, 0);
+    int bytes_sent = ::send(m_client, pData, totalSize, 0);
 
     if (bytes_sent == SOCKET_ERROR) {
         // 处理错误

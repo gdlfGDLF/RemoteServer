@@ -1,9 +1,107 @@
 #include "serverlistener.h"
-
+#include<io.h>
 #include <QApplication>
 #include "Serversocket.h"
 #include "direct.h"
 #include"QScreen"
+#include <shellapi.h>
+#include <QDateTime>
+#include <qdatastream.h>
+#include <qbuffer.h>
+#include<lockworker.h>
+typedef struct file_info{
+    file_info(){
+        IsInvalid=FALSE;
+        IsDriectory=-1;
+        HasNext=TRUE;
+        memset(szFileName,0,sizeof(szFileName));
+    }
+    BOOL IsInvalid;//是否有效
+    BOOL IsDriectory;//是否是目录 0否1是
+    BOOL HasNext; //是否有后续 0无 1 有
+    char szFileName[256];//文件名
+
+
+}FILEINFO,*PFILEINFO;
+void Dump(const BYTE* pData, size_t nSize);
+int MakeDirverInfo();
+int MakeDirectoryInfo();
+int RunFile();
+int DownLoad();
+int MouseEVent();
+int SendScreen();
+int TestConnect();
+
+
+int execute(int cmd,CServersocket& server)
+{
+    int nCmd=cmd;
+    qDebug()<<"recive cmd:"<<cmd;
+    int ret =1;
+    switch (nCmd) {
+        case 1://看查盘符
+            ret=MakeDirverInfo();
+            break;
+        case 2://看下指定目录下文件
+            ret=MakeDirectoryInfo();
+            break;
+        case 3://打开
+            ret=RunFile();
+            break;
+        case 4://下载
+            ret=DownLoad();
+            break;
+        case 5://鼠标操作
+            //ret=MouseEvent();
+            break;
+        case 6://看查屏幕
+            ret=SendScreen();
+            break;
+        case 7://锁机
+            g_isLocked.store(true);
+            emit server.lockCommandReceived();
+            break;
+        case 8://解锁
+            g_isLocked.store(FALSE);
+            break;
+        case 12138:
+            qDebug()<<"12138!";
+            TestConnect();
+        default:
+            //qDebug()<<"1";
+            ret=-99;
+        }
+    return ret;
+}
+void ServerListener::listenLoop() {
+    // 获取单例对象
+    qDebug()<<"listenLoop！";
+    CServersocket& server = CServersocket::GetInstance();
+    if(server.StartListen()==false)
+    {
+        qDebug()<<"StartListen=flase！";
+        return;
+    }
+    while(true)
+    {
+        if(server.AcceptClient()==INVALID_SOCKET)
+        {
+            qDebug()<<"AcceptClient=flase！";
+            break;
+        }
+        qDebug()<<"AcceptClient=true！";
+        int ret=server.DealCommand();
+        qDebug()<<"ret:"<<ret;
+        int exeBack=execute(ret,server);
+        if(exeBack == -1)
+        {
+            qDebug()<<"命令错误！";
+        }
+        server.closeLink();
+    }
+    qDebug()<<"退出linstenLOOp";
+    return ;
+}
 
 void Dump(const BYTE* pData, size_t nSize)
 {
@@ -19,7 +117,7 @@ void Dump(const BYTE* pData, size_t nSize)
         sout += buf;
     }
     sout += "\n";
-    qDebug() << sout.c_str();
+    qDebug() <<"dump!"<< sout.c_str();
 }
 int MakeDirverInfo()
 {
@@ -34,30 +132,17 @@ int MakeDirverInfo()
         }
     }
     SPackeg pack(1,(BYTE*)result.c_str(),result.size());
-    //Dump((BYTE*)pack.getPacketBuffer().data(),pack.nLength);
-    //CServersocket::GetInstance().Send();
+    Dump((BYTE*)pack.getPacketBuffer().data(),pack.nLength);
+    CServersocket::GetInstance().Send(pack);
     return 0;
 }
-#include<io.h>
-typedef struct file_info{
-    file_info(){
-        IsInvalid=FALSE;
-        IsDriectory=-1;
-        HasNext=TRUE;
-        memset(szFileName,0,sizeof(szFileName));
-    }
-    BOOL IsInvalid;//是否有效
-    BOOL IsDriectory;//是否是目录 0否1是
-    BOOL HasNext; //是否有后续 0无 1 有
-    char szFileName[256];//文件名
-
-
-}FILEINFO,*PFILEINFO;
 
 int MakeDirectoryInfo()
 {
-    std::string strPath;
-    //std::list<FILEINFO> lstFileInfos;
+
+    SPackeg currentPacket = CServersocket::GetInstance().GetPackeg();
+    std::string strPath = currentPacket.strData.data();
+    qDebug()<<"MakeDirinfo!:"<<strPath;
     if(CServersocket::GetInstance().GetFilePath(strPath)==false)
     {
         qDebug()<<"当前命令错误 GetFilePath!";
@@ -101,7 +186,7 @@ int MakeDirectoryInfo()
     CServersocket::GetInstance().Send(pack);
     return 0;
 }
-#include <shellapi.h>
+
 int RunFile()
 {
     std::string strPath;
@@ -206,9 +291,6 @@ int MouseEVent()
     case 3: // 松开 (UP)
         mouse_event(up_flag, 0, 0, 0, GetMessageExtraInfo());
         break;
-
-        // ⚠️ 忽略 nAction=1 (双击)，双击最好在客户端生成两个单击事件发送，
-        // 或者简单地在服务器端执行两次 Click 逻辑。
     case 1: // 双击 (Double Click)
         // 执行两次完整的按下-松开序列
         mouse_event(down_flag, 0, 0, 0, GetMessageExtraInfo());
@@ -224,9 +306,7 @@ int MouseEVent()
 
     return 1;
 }
-#include <QDateTime>
-#include <qdatastream.h>
-#include <qbuffer.h>
+
 int SendScreen()
 {
     /*
@@ -269,7 +349,7 @@ int SendScreen()
         return -1;
     }
 }
-#include<lockworker.h>
+
 
 int TestConnect()
 {
@@ -277,70 +357,4 @@ int TestConnect()
     SPackeg pack(12138,NULL,0);
     CServersocket::GetInstance().Send(pack);
     return 0;
-}
-int execute(int cmd,CServersocket& server)
-{
-    int nCmd=cmd;
-    qDebug()<<"recive cmd:"<<cmd;
-    int ret =1;
-    switch (nCmd) {
-        case 1://看查盘符
-            ret=MakeDirverInfo();
-            break;
-        case 2://看下指定目录下文件
-            ret=MakeDirectoryInfo();
-            break;
-        case 3://打开
-            ret=RunFile();
-            break;
-        case 4://下载
-            ret=DownLoad();
-            break;
-        case 5://鼠标操作
-            //ret=MouseEvent();
-            break;
-        case 6://看查屏幕
-            ret=SendScreen();
-            break;
-        case 7://锁机
-            g_isLocked.store(true);
-            emit server.lockCommandReceived();
-            break;
-        case 8://解锁
-            g_isLocked.store(FALSE);
-            break;
-        case 12138:
-            qDebug()<<"12138!";
-            TestConnect();
-        default:
-            //qDebug()<<"1";
-            ret=-99;
-        }
-    return ret;
-}
-void ServerListener::listenLoop() {
-    // 获取单例对象
-    qDebug()<<"listenLoop！";
-    CServersocket& server = CServersocket::GetInstance();
-    if(server.StartListen()==false)
-    {
-        qDebug()<<"StartListen=flase！";
-        return;
-    }
-    while(true)
-    {
-        if(server.AcceptClient()==INVALID_SOCKET)
-        {
-            qDebug()<<"AcceptClient=flase！";
-            break;
-        }
-        qDebug()<<"AcceptClient=true！";
-        int ret=server.DealCommand();
-        int exeBack=execute(ret,server);
-        if(exeBack == -1)
-        {
-            qDebug()<<"命令错误！";
-        }
-        server.closeLink();
-    }
 }
