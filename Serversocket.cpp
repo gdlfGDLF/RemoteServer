@@ -57,7 +57,7 @@ SOCKET CServersocket::AcceptClient() {
     return m_client;
 }
 bool CServersocket::GetFilePath(std::string& strPath){
-    if(m_packet.sCmd>=2&&m_packet.sCmd<=4)
+    if(m_packet.sCmd>=2&&m_packet.sCmd<=5)
     {
         strPath=m_packet.strData.data();
         return TRUE;
@@ -75,14 +75,8 @@ bool CServersocket::GetMouseEvent(MouseEvent& mouse)
 }
 bool CServersocket::Send(const SPackeg& pack) {
     const std::vector<char>& buffer = pack.getPacketBuffer();
-
-    // 1. 获取完整数据的指针
     const char* pData = buffer.data();
-
-    // 2. 获取准确的长度
-    size_t totalSize = buffer.size(); // 或者使用 pack.nLength，但 buffer.size() 更可靠
-
-    // 3. 调用 send，并检查是否所有字节都发送成功
+    size_t totalSize = buffer.size();
     int bytes_sent = ::send(m_client, pData, totalSize, 0);
 
     if (bytes_sent == SOCKET_ERROR) {

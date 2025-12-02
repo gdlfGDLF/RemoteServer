@@ -9,23 +9,22 @@
 #include <qdatastream.h>
 #include <qbuffer.h>
 #include<lockworker.h>
-typedef struct file_info{
-    file_info(){
-        IsInvalid=FALSE;
-        IsDriectory=-1;
-        HasNext=TRUE;
-        memset(szFileName,0,sizeof(szFileName));
-    }
-    BOOL IsInvalid;//是否有效
-    BOOL IsDriectory;//是否是目录 0否1是
-    BOOL HasNext; //是否有后续 0无 1 有
-    char szFileName[256];//文件名
+#include <filesystem>
+#pragma pack(1)
+struct FilePacketHeader {
+    // 使用 uint8_t 确保大小是 1 字节，且无符号
+    uint8_t isDirectory;
+    uint8_t hasChildren;
+    // 使用 uint32_t 确保大小是 4 字节，用于存储文件名长度
+    uint32_t nameLength;
+};
+#pragma pack()
 
 
-}FILEINFO,*PFILEINFO;
 void Dump(const BYTE* pData, size_t nSize);
 int MakeDirverInfo();
 int MakeDirectoryInfo();
+int DirectioryInfo();
 int RunFile();
 int DownLoad();
 int MouseEVent();
@@ -43,7 +42,7 @@ int execute(int cmd,CServersocket& server)
             ret=MakeDirverInfo();
             break;
         case 2://看下指定目录下文件
-            ret=MakeDirectoryInfo();
+            ret=DirectioryInfo();
             break;
         case 3://打开
             ret=RunFile();
@@ -51,17 +50,19 @@ int execute(int cmd,CServersocket& server)
         case 4://下载
             ret=DownLoad();
             break;
-        case 5://鼠标操作
+        case 5://删除
+            break;
+        case 6://鼠标操作
             //ret=MouseEvent();
             break;
-        case 6://看查屏幕
+        case 7://看查屏幕
             ret=SendScreen();
             break;
-        case 7://锁机
+        case 8://锁机
             g_isLocked.store(true);
             emit server.lockCommandReceived();
             break;
-        case 8://解锁
+        case 9://解锁
             g_isLocked.store(FALSE);
             break;
         case 12138:
@@ -131,61 +132,178 @@ int MakeDirverInfo()
             result+='A'+i-1;
         }
     }
-    SPackeg pack(1,(BYTE*)result.c_str(),result.size());
+    //result+='/0';
+    SPackeg pack(1,(BYTE*)result.c_str(),result.size()+1);
     Dump((BYTE*)pack.getPacketBuffer().data(),pack.nLength);
     CServersocket::GetInstance().Send(pack);
     return 0;
 }
-
-int MakeDirectoryInfo()
+namespace fs = std::filesystem; // 简化命名空间
+bool hasChildren(fs::directory_entry entry);
+/*
+int DirectioryInfo()
 {
-
     SPackeg currentPacket = CServersocket::GetInstance().GetPackeg();
-    std::string strPath = currentPacket.strData.data();
-    qDebug()<<"MakeDirinfo!:"<<strPath;
-    if(CServersocket::GetInstance().GetFilePath(strPath)==false)
-    {
-        qDebug()<<"当前命令错误 GetFilePath!";
+    std::string pathString = currentPacket.strData.data();
+    fs::path DirPath = pathString;
+    const WORD CMD_FILE_LIST = 2;
+    FilePacketHeader header;
+    std::string entryPathStr;
+    QByteArray payload;
+    try {
+        for (const auto& entry : fs::directory_iterator(DirPath)) {
+            fs::path filename = entry.path().filename();
+            std::string entryFileNameStr{};
+            if (filename == "." || filename == "..") {
+                continue; // 跳过本次循环
+            }
+            if (entry.is_regular_file() || entry.is_directory()) {
+                // 【正式获取文件名】
+                entryFileNameStr = filename.u8string();
+            }
+            header.isDirectory = entry.is_directory();
+            //定义结构体
+            if(header.isDirectory)
+            {
+                //如果是文件夹 判断有没有内容;
+                header.hasChildren = hasChildren(entry);
+            }
+            else
+            {
+                //如果是文件 那肯定没有子文件
+                header.hasChildren =false;
+            }
+            header.nameLength = (uint32_t)entryFileNameStr.size();
+
+            //计算长度 *****  信息头+文件名
+            const size_t HEADER_SIZE = sizeof(FilePacketHeader);
+            size_t totalPayloadSize = HEADER_SIZE + entryFileNameStr.size();//总长度
+            payload.resize(totalPayloadSize);
+            qDebug()<<header.nameLength;
+            char* cursor = payload.data();
+            memcpy(cursor, &header, HEADER_SIZE);
+            cursor += HEADER_SIZE;
+            memcpy(cursor, entryFileNameStr.data(), entryFileNameStr.size());
+
+            SPackeg pack(CMD_FILE_LIST,
+                         (BYTE*)payload.constData(),
+                         payload.size());
+            qDebug()<<"send fileinfo ";
+            CServersocket::GetInstance().Send(pack);
+        }
+    }
+    catch (const fs::filesystem_error& e) {
+        qDebug() << "文件系统错误: " << e.what();
+        SPackeg errPack(-999,NULL,0);
+        CServersocket::GetInstance().Send(errPack);
         return -1;
     }
-    if(_chdir(strPath.c_str())!=0)
-    {
-        FILEINFO finfo;
-        finfo.IsInvalid=TRUE;
-        finfo.IsDriectory=TRUE;
-        finfo.HasNext=FALSE;
-        size_t len = strPath.size();
-        if (len < sizeof(finfo.szFileName)) { // 确保不越界
-            memcpy(finfo.szFileName, strPath.c_str(), len + 1); // +1 复制 \0
-        }
-        //lstFileInfos.push_back(finfo);
-        SPackeg pack((WORD)2,(BYTE*)&finfo,sizeof(finfo));
-        CServersocket::GetInstance().Send(pack);
+    SPackeg endPack(-1, nullptr, 0);//暂时代表结束
+    CServersocket::GetInstance().Send(endPack);
+    return 1;
+}*/
+int DirectioryInfo()
+{
+    SPackeg currentPacket = CServersocket::GetInstance().GetPackeg();
+    std::string pathString = currentPacket.strData.data();
+    fs::path DirPath = pathString;
 
-        qDebug()<<"无权限访问目录";
-        return -2;
+    // 其他变量初始化
+    const WORD CMD_FILE_LIST = 2;
+    FilePacketHeader header;
+    std::string entryPathStr;
+    QByteArray payload;
+
+
+    std::error_code ec; // 声明 error_code 对象
+    fs::directory_iterator it(DirPath, ec);
+    if (ec) {
+        qDebug() << "文件系统错误：无法访问路径 " << DirPath.string().c_str()
+                 << "。原因: " << ec.message().c_str();
+        SPackeg errPack(-999, NULL, 0);
+        CServersocket::GetInstance().Send(errPack);
+        return -1;
     }
-    _finddata_t fdata;
-    int hfind =0;
-    if((hfind=_findfirst("*",&fdata))==-1)
+    while (it != fs::directory_iterator())
     {
-        qDebug()<<"未找到任何文件";
-        return -3;
-    }
-    do{
-        FILEINFO finfo;
-        finfo.IsDriectory = (fdata.attrib &_A_SUBDIR)!=0;
-        memcpy(finfo.szFileName,fdata.name,strlen(fdata.name));
-        //lstFileInfos.push_back(finfo);
-        SPackeg pack((WORD)2,(BYTE*)&finfo,sizeof(finfo));
+        // 1. 获取当前 entry
+        const auto& entry = *it;
+
+        fs::path filename = entry.path().filename();
+        std::string entryFileNameStr{};
+
+        if (filename == "." || filename == "..") {
+            // 在递增前 continue，确保跳过当前 entry 的后续逻辑
+            it.increment(ec);
+            if (ec) { /* 忽略递增时的潜在错误，等待下一轮处理 */ ec.clear(); }
+            continue;
+        }
+
+        entryFileNameStr = filename.u8string();
+        qDebug()<<entryFileNameStr;
+        header.isDirectory = entry.is_directory();
+        if(header.isDirectory) {
+            header.hasChildren = hasChildren(entry); // 假设 hasChildren 不会抛异常
+        } else {
+            header.hasChildren = false;
+        }
+        header.nameLength = (uint32_t)entryFileNameStr.size();
+
+        const size_t HEADER_SIZE = sizeof(FilePacketHeader);
+        size_t totalPayloadSize = HEADER_SIZE + entryFileNameStr.size();
+        payload.resize(totalPayloadSize);
+        //qDebug()<<header.nameLength;
+        char* cursor = payload.data();
+        memcpy(cursor, &header, HEADER_SIZE);
+        cursor += HEADER_SIZE;
+        memcpy(cursor, entryFileNameStr.data(), entryFileNameStr.size());
+
+        SPackeg pack(CMD_FILE_LIST,
+                     (BYTE*)payload.constData(),
+                     payload.size());
+        //qDebug()<<"send fileinfo ";
         CServersocket::GetInstance().Send(pack);
-    }while(!_findnext(hfind,&fdata));
-    FILEINFO finfo;
-    finfo.HasNext=FALSE;
-    SPackeg pack((WORD)2,(BYTE*)&finfo,sizeof(finfo));
-    CServersocket::GetInstance().Send(pack);
-    return 0;
+        // 2. 关键步骤：递增迭代器并检查错误
+        it.increment(ec);
+        if (ec) {
+            // 遇到不可访问的目录项或文件时，不退出循环
+            qDebug() << "警告：跳过不可访问的目录项。原因: " << ec.message().c_str();
+            ec.clear(); // 清除错误状态，确保下一次迭代可以尝试继续
+        }
+    }
+    SPackeg endPack(-1, nullptr, 0);//暂时代表结束
+    CServersocket::GetInstance().Send(endPack);
+    return 1;
 }
+bool hasChildren(fs::directory_entry entry)
+{
+    std::error_code ec; // 声明 error_code 对象
+
+    // 1. 尝试构造迭代器，并传入 ec。如果目录不可访问，it 的构造会失败，
+    //    但不会抛出异常，而是将 ec 设置为权限错误。
+    fs::directory_iterator it(entry.path(), ec);
+    if (ec) {
+         qDebug() << "hasChildren 警告：无法访问目录 " << entry.path().string().c_str()<< "。原因: " << ec.message().c_str();
+        return false;
+    }
+    // 3. 检查目录是否为空
+    // 如果构造成功且 it != fs::directory_iterator()，则目录非空
+    // 还需要跳过 "." 和 ".."
+    for (auto const& dir_entry : it)
+    {
+        // 过滤掉 '.' 和 '..'
+        if (dir_entry.path().filename() != "." && dir_entry.path().filename() != "..") {
+            return true; // 找到了至少一个子项，返回 true
+        }
+    }
+
+    return false;
+}
+
+
+
+
+
 
 int RunFile()
 {
@@ -201,17 +319,25 @@ int DownLoad()
     std::string strPath;
     long long data=0;
     CServersocket::GetInstance().GetFilePath(strPath);
+    qDebug()<<strPath;
     FILE* pFile=NULL;
     errno_t err=fopen_s(&pFile,strPath.c_str(),"rb");
     if(err!=0){
-        SPackeg pack(4,(BYTE*)&data,8);
+        SPackeg pack(100,NULL,0);//打开失败直接发错误
         CServersocket::GetInstance().Send(pack);
         return -1;
     }
-    if(pFile==NULL){
+    if(pFile!=NULL){
         fseek(pFile,0,SEEK_END);
         data=_ftelli64(pFile);
-        SPackeg head(4,(BYTE*)&data,8);
+        qDebug()<<"filesize:"<<data;
+        const int MAX_PAYLOAD = 1024;
+        int num_packets = (data + MAX_PAYLOAD - 1) / MAX_PAYLOAD;
+        long long total_bytes_to_send = data + (long long)num_packets * 10 + 28;
+
+        SPackeg head(15,(BYTE*)&total_bytes_to_send,8); //判断文件大小 发出去第一个包 让客户端确认大小
+        qDebug()<<"head.sinze:"<<head.nLength;
+        CServersocket::GetInstance().Send(head);
         fseek(pFile,0,SEEK_SET);
 
         char buffer[1024]="";
@@ -219,11 +345,21 @@ int DownLoad()
         do{
             rlen=fread(buffer,1,1024,pFile);
             SPackeg pack(4,(BYTE*)buffer,rlen);
+            //qDebug() << "Data Packet nLength Check:" << pack.nLength; // 期望输出 64
+            // 立即在发送前再次检查其 buffer 中的字节：
+            //const char* data_ptr = pack.getPacketBuffer().data();
+            //qDebug()<<"send pack length:"<<pack.nLength;
+            //qDebug()<<"iiiiiiiiiiiiiiiii:"<<i++;
+            // qDebug() << "Data Packet Raw nLength Bytes Before Send:"
+            //          << (int)data_ptr[2] << (int)data_ptr[3] << (int)data_ptr[4] << (int)data_ptr[5];
+            //qDebug()<<"packlength:"<<sizeof(pack.getPacketBuffer());
             CServersocket::GetInstance().Send(pack);
         }while(rlen==1024);
     }
-    SPackeg pack((WORD)4,NULL,0);
+    SPackeg pack((WORD)99,NULL,0); //99表示发包结束了
+    qDebug()<<"sned end pack!";
     CServersocket::GetInstance().Send(pack);
+    //qDebug()<<"end pack size"<<pack.nLength;
     fclose(pFile);
     return 1;
 }

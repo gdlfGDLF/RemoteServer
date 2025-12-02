@@ -36,7 +36,8 @@ public:
         sHead=0XFEFF;
         nLength=nSize+10;
         sCmd=nCmd;
-        if(nSize>0)
+        sSum=0;
+        if(nSize>=0)
         {
             strData.resize(nSize);
             memcpy(strData.data(),data,nSize);
